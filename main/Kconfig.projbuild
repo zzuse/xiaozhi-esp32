@@ -708,6 +708,16 @@ config RESPEAKER_I2S_CLOCK_PROBE_ONLY
         This diagnostic does not initialize I2S or start the Xiaozhi application.
         Disable it and rebuild to restore normal operation.
 
+config ATK_DNESP32S3_BOX_DESKTOP
+    bool "ATK-DNESP32S3-BOX: touch desktop with media apps"
+    depends on BOARD_TYPE_ATK_DNESP32S3_BOX
+    default n
+    help
+        Boot into a touch desktop that hosts the Xiaozhi chat as one app next to
+        Camera (USB UVC), Video (AVI/MJPEG), Photo (JPG/PNG/BMP) and Music
+        (MP3/WAV/AAC/FLAC) apps. Media is read from the TF card under /sdcard.
+        Requires the CHSC5432 touch panel.
+
 choice XIAOZHI_NETWORK_TYPE
     prompt "Network Type"
     depends on BOARD_TYPE_WAVESHARE_ESP32_P4_NANO

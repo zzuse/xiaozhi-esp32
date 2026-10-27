@@ -8,6 +8,21 @@
             "sdkconfig_append": [
                 "CONFIG_USE_WECHAT_MESSAGE_STYLE=y"
             ]
+        },
+        {
+            "name": "atk-dnesp32s3-box-desktop",
+            "sdkconfig_append": [
+                "CONFIG_USE_WECHAT_MESSAGE_STYLE=y",
+                "CONFIG_ATK_DNESP32S3_BOX_DESKTOP=y",
+                "CONFIG_LV_FONT_MONTSERRAT_14=y",
+                "CONFIG_LV_FONT_MONTSERRAT_20=y",
+                "CONFIG_LV_FONT_MONTSERRAT_48=y",
+                "CONFIG_ESP_VIDEO_ENABLE_USB_UVC_VIDEO_DEVICE=y",
+                "CONFIG_USB_UVC_INIT_TIMEOUT_MS=3000",
+                "CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT=y",
+                "CONFIG_FATFS_LFN_HEAP=y",
+                "CONFIG_FATFS_API_ENCODING_UTF_8=y"
+            ]
         }
     ]
 }

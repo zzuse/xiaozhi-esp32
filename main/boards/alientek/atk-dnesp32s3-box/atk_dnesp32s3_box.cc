@@ -17,6 +17,19 @@
 #include <esp_lcd_panel_vendor.h>
 #include <esp_lcd_panel_ops.h>
 
+#if CONFIG_ATK_DNESP32S3_BOX_DESKTOP
+#include "chsc5432_touch.h"
+#include "desktop_display.h"
+#include "esp_video.h"
+
+#include <atomic>
+#include <driver/sdspi_host.h>
+#include <driver/spi_master.h>
+#include <esp_lvgl_port.h>
+#include <esp_vfs_fat.h>
+#include <sdmmc_cmd.h>
+#endif
+
 #define TAG "atk_dnesp32s3_box"
 
 class ATK_NoAudioCodecDuplex : public NoAudioCodec {
@@ -79,6 +92,34 @@ public:
     }
 };
 
+#if CONFIG_ATK_DNESP32S3_BOX_DESKTOP
+// Lets desktop media playback keep the speaker powered: AudioService turns the output
+// off after it has been idle for a while, which would cut off music and video sound.
+template <typename Base>
+class MediaHoldCodec : public Base {
+public:
+    using Base::Base;
+
+    void SetMediaOutputHold(bool hold) { hold_ = hold; }
+
+    void EnableOutput(bool enable) override {
+        if (!enable && hold_) {
+            return;
+        }
+        Base::EnableOutput(enable);
+    }
+
+private:
+    std::atomic<bool> hold_{false};
+};
+
+using BoxEs8311AudioCodec = MediaHoldCodec<Es8311AudioCodec>;
+using BoxNs4168AudioCodec = MediaHoldCodec<ATK_NoAudioCodecDuplex>;
+#else
+using BoxEs8311AudioCodec = Es8311AudioCodec;
+using BoxNs4168AudioCodec = ATK_NoAudioCodecDuplex;
+#endif
+
 class XL9555_IN : public I2cDevice {
 public:
     XL9555_IN(i2c_master_bus_handle_t i2c_bus, uint8_t addr) : I2cDevice(i2c_bus, addr) {
@@ -133,7 +174,110 @@ private:
     LcdDisplay* display_;
     XL9555_IN* xl9555_in_;
     bool es8311_detected_ = false;
-    
+#if CONFIG_ATK_DNESP32S3_BOX_DESKTOP
+    Chsc5432Touch* touch_ = nullptr;
+    Camera* camera_ = nullptr;
+    sdmmc_card_t* tf_card_ = nullptr;
+    std::atomic<bool> tf_mounted_{false};
+    bool tf_spi_ready_ = false;
+    std::function<void(bool)> media_output_hold_;
+
+    DesktopServices CreateDesktopServices() {
+        DesktopServices services;
+        services.audio_codec = [this]() { return GetAudioCodec(); };
+        services.set_media_output_hold = [this](bool hold) {
+            GetAudioCodec();
+            media_output_hold_(hold);
+        };
+        services.is_tf_mounted = [this]() { return tf_mounted_.load(); };
+        services.ensure_tf_mounted = [this]() { return MountTfCard(); };
+        return services;
+    }
+
+    bool MountTfCard() {
+        // Once mounted, removal is left to the file APIs: probing the card here could
+        // interleave with reads from an app worker on the same SPI device.
+        if (tf_mounted_) {
+            return true;
+        }
+        if (!tf_spi_ready_) {
+            spi_bus_config_t bus_cfg = {};
+            bus_cfg.mosi_io_num = TF_SPI_MOSI;
+            bus_cfg.miso_io_num = TF_SPI_MISO;
+            bus_cfg.sclk_io_num = TF_SPI_SCLK;
+            bus_cfg.quadwp_io_num = GPIO_NUM_NC;
+            bus_cfg.quadhd_io_num = GPIO_NUM_NC;
+            bus_cfg.max_transfer_sz = 4096;
+            if (spi_bus_initialize(TF_SPI_HOST, &bus_cfg, SPI_DMA_CH_AUTO) != ESP_OK) {
+                ESP_LOGE(TAG, "TF card SPI bus init failed");
+                return false;
+            }
+            tf_spi_ready_ = true;
+        }
+
+        sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+        host.slot = TF_SPI_HOST;
+        sdspi_device_config_t slot_cfg = SDSPI_DEVICE_CONFIG_DEFAULT();
+        slot_cfg.gpio_cs = TF_SPI_CS;
+        slot_cfg.host_id = TF_SPI_HOST;
+        esp_vfs_fat_sdmmc_mount_config_t mount_cfg = {};
+        mount_cfg.format_if_mount_failed = false;
+        mount_cfg.max_files = 5;
+        mount_cfg.allocation_unit_size = 16 * 1024;
+        esp_err_t err = esp_vfs_fat_sdspi_mount(TF_MOUNT_POINT, &host, &slot_cfg, &mount_cfg,
+                                                &tf_card_);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "TF card not mounted: %s", esp_err_to_name(err));
+            tf_card_ = nullptr;
+            return false;
+        }
+        ESP_LOGI(TAG, "TF card mounted at %s", TF_MOUNT_POINT);
+        tf_mounted_ = true;
+        return true;
+    }
+
+    void InitializeTouch() {
+        xl9555_in_->SetOutputState(XL9555_BIT_CTP_RST, 0);
+        vTaskDelay(pdMS_TO_TICKS(20));
+        xl9555_in_->SetOutputState(XL9555_BIT_CTP_RST, 1);
+        vTaskDelay(pdMS_TO_TICKS(100));
+
+        if (i2c_master_probe(i2c_bus_, TOUCH_CHSC5432_ADDR, 50) != ESP_OK) {
+            ESP_LOGW(TAG, "No CHSC5432 touch panel found");
+            return;
+        }
+        touch_ = new Chsc5432Touch(i2c_bus_, TOUCH_CHSC5432_ADDR, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+        if (!touch_->Probe()) {
+            return;
+        }
+        lvgl_port_lock(0);
+        touch_->AttachToLvgl(lv_display_get_default());
+        lvgl_port_unlock();
+    }
+
+    void InitializeCamera() {
+        // Waits up to CONFIG_USB_UVC_INIT_TIMEOUT_MS for a UVC camera on the USB port
+        esp_video_init_usb_uvc_config_t usb_uvc_config = {
+            .uvc = {
+                .uvc_dev_num = 1,
+                .task_stack = 4096,
+                .task_priority = 5,
+                .task_affinity = -1,
+            },
+            .usb = {
+                .init_usb_host_lib = true,
+                .task_stack = 4096,
+                .task_priority = 5,
+                .task_affinity = -1,
+            },
+        };
+        esp_video_init_config_t video_config = {
+            .usb_uvc = &usb_uvc_config,
+        };
+        camera_ = new EspVideo(video_config);
+    }
+#endif
+
     void InitializeI2c() {
         // Initialize I2C peripheral
         i2c_master_bus_config_t i2c_bus_cfg = {
@@ -234,8 +378,14 @@ private:
         esp_lcd_panel_mirror(panel, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
         ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
 
+#if CONFIG_ATK_DNESP32S3_BOX_DESKTOP
+        display_ = new DesktopDisplay(panel_io, panel,
+                                    DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY,
+                                    CreateDesktopServices());
+#else
         display_ = new SpiLcdDisplay(panel_io, panel,
                                     DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
+#endif
     }
 
     void InitializeButtons() {
@@ -256,13 +406,24 @@ public:
         xl9555_in_->SetOutputState(5, 1);
         xl9555_in_->SetOutputState(7, 1);
         InitializeButtons();
+#if CONFIG_ATK_DNESP32S3_BOX_DESKTOP
+        InitializeTouch();
+        MountTfCard();
+        InitializeCamera();
+#endif
     }
+
+#if CONFIG_ATK_DNESP32S3_BOX_DESKTOP
+    virtual Camera* GetCamera() override {
+        return camera_;
+    }
+#endif
 
     virtual AudioCodec* GetAudioCodec() override {
         /* 根据探测结果初始化编解码器 */
         if (es8311_detected_) {
             /* 使用ES8311 驱动 */
-            static Es8311AudioCodec audio_codec(
+            static BoxEs8311AudioCodec audio_codec(
                 i2c_bus_, 
                 I2C_NUM_0, 
                 AUDIO_INPUT_SAMPLE_RATE,
@@ -272,18 +433,28 @@ public:
                 AUDIO_I2S_GPIO_WS,
                 AUDIO_I2S_GPIO_DOUT,
                 AUDIO_I2S_GPIO_DIN,
-                GPIO_NUM_NC, 
-                AUDIO_CODEC_ES8311_ADDR, 
+                GPIO_NUM_NC,
+                AUDIO_CODEC_ES8311_ADDR,
                 false);
+#if CONFIG_ATK_DNESP32S3_BOX_DESKTOP
+                if (!media_output_hold_) {
+                    media_output_hold_ = [](bool hold) { audio_codec.SetMediaOutputHold(hold); };
+                }
+#endif
                 return &audio_codec;
         } else {
-            static ATK_NoAudioCodecDuplex audio_codec(
+            static BoxNs4168AudioCodec audio_codec(
                 AUDIO_INPUT_SAMPLE_RATE,
                 AUDIO_OUTPUT_SAMPLE_RATE,
                 AUDIO_I2S_GPIO_BCLK,
                 AUDIO_I2S_GPIO_WS,
                 AUDIO_I2S_GPIO_DOUT,
                 AUDIO_I2S_GPIO_DIN);
+#if CONFIG_ATK_DNESP32S3_BOX_DESKTOP
+                if (!media_output_hold_) {
+                    media_output_hold_ = [](bool hold) { audio_codec.SetMediaOutputHold(hold); };
+                }
+#endif
                 return &audio_codec;
         }
         return NULL;

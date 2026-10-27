@@ -43,4 +43,19 @@
 #define GPIO_LCD_D6 GPIO_NUM_9
 #define GPIO_LCD_D7 GPIO_NUM_46
 
+// Peripherals used by the desktop variant (same wiring as the factory demo)
+#define TF_SPI_HOST SPI2_HOST
+#define TF_SPI_SCLK GPIO_NUM_7
+#define TF_SPI_MOSI GPIO_NUM_16
+#define TF_SPI_MISO GPIO_NUM_15
+#define TF_SPI_CS   GPIO_NUM_17
+#define TF_MOUNT_POINT "/sdcard"
+
+#define TOUCH_CHSC5432_ADDR 0x2E
+
+// XL9555 output bits
+#define XL9555_BIT_SPK_CTRL 5
+#define XL9555_BIT_CTP_RST  6
+#define XL9555_BIT_LCD_BL   7
+
 #endif // _BOARD_CONFIG_H_
