@@ -23,6 +23,8 @@ struct DesktopServices {
     std::function<bool()> is_tf_mounted;
     // Mounts the TF card if needed (slow when no card is inserted). LVGL task only.
     std::function<bool()> ensure_tf_mounted;
+    // Theme text font, refreshed each time an app opens. Do not keep it past Close():
+    // the theme can swap fonts at runtime and free the old one.
     const lv_font_t* text_font = nullptr;
 };
 

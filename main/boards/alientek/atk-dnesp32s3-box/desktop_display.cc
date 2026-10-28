@@ -50,8 +50,6 @@ void DesktopDisplay::SetupUI() {
     if (desktop_screen_ != nullptr) {
         return;
     }
-    auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
-    services_.text_font = lvgl_theme->text_font()->font();
     chat_screen_ = lv_screen_active();
 
     BuildDesktop();
@@ -221,6 +219,11 @@ void DesktopDisplay::OpenApp(AppId id) {
     lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
     lv_screen_load(screen);
     CloseApp();
+
+    // Read the font now: loading the assets partition replaces the theme font after
+    // SetupUI and frees the previous one, so a pointer cached earlier would dangle.
+    auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+    services_.text_font = lvgl_theme->text_font()->font();
 
     app_screen_ = screen;
     switch (id) {
